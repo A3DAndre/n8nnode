@@ -2,7 +2,6 @@ import { IExecuteFunctions, INodeExecutionData, INodeType, INodeTypeDescription,
 import { S3VectorStore, S3VectorStoreConfig } from './S3VectorStore';
 import { Document } from '@langchain/core/documents';
 import type { Embeddings } from '@langchain/core/embeddings';
-
 export class VectorStoreAwsS3 implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'AWS S3 Vector Store',
