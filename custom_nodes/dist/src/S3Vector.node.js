@@ -4,6 +4,7 @@ exports.S3Vector = void 0;
 const n8n_workflow_1 = require("n8n-workflow");
 const aws_1 = require("@langchain/aws");
 const client_s3vectors_1 = require("@aws-sdk/client-s3vectors");
+const textsplitters_1 = require("@langchain/textsplitters");
 /**
  * Simple S3 Vector Node - Everything in one file
  * Based on the Python example for AWS S3 Vectors
@@ -70,7 +71,7 @@ class S3Vector {
                     name: 'region',
                     type: 'string',
                     required: true,
-                    default: 'us-east-1',
+                    default: 'us-east-2',
                     description: 'AWS region',
                 },
                 // Embedding Configuration
@@ -79,7 +80,7 @@ class S3Vector {
                     name: 'embeddingModel',
                     type: 'string',
                     required: true,
-                    default: 'amazon.titan-embed-text-v1',
+                    default: 'amazon.titan-embed-text-v2:0',
                     description: 'Bedrock embedding model ID',
                 },
                 {
@@ -89,31 +90,23 @@ class S3Vector {
                     default: 1536,
                     description: 'Number of embedding dimensions',
                 },
-                // Insert Configuration
                 {
-                    displayName: 'Text Field',
-                    name: 'textField',
+                    displayName: 'Data',
+                    name: 'data',
                     type: 'string',
                     required: true,
                     default: 'text',
-                    description: 'Field containing text to embed',
+                    description: 'Field containing text to process for embedding',
+                },
+                {
+                    displayName: 'Key',
+                    name: 'key',
+                    type: 'string',
+                    default: '',
+                    description: 'Unique key for the document',
                     displayOptions: {
                         show: {
                             operation: ['insert'],
-                        },
-                    },
-                },
-                // Search Configuration
-                {
-                    displayName: 'Search Query',
-                    name: 'searchQuery',
-                    type: 'string',
-                    default: '',
-                    required: true,
-                    description: 'Text to search for',
-                    displayOptions: {
-                        show: {
-                            operation: ['search'],
                         },
                     },
                 },
@@ -133,141 +126,185 @@ class S3Vector {
         };
     }
     async execute() {
-        const items = this.getInputData();
-        const returnData = [];
         const operation = this.getNodeParameter('operation', 0);
-        console.log(`[S3Vector] Starting ${operation} operation with ${items.length} items`);
-        for (let i = 0; i < items.length; i++) {
-            try {
-                // Get parameters
-                const bucketName = this.getNodeParameter('bucketName', i);
-                const indexName = this.getNodeParameter('indexName', i);
-                const region = this.getNodeParameter('region', i);
-                const embeddingModel = this.getNodeParameter('embeddingModel', i);
-                const embeddingDimensions = this.getNodeParameter('embeddingDimensions', i);
-                console.log(`[S3Vector] Config - Bucket: ${bucketName}, Index: ${indexName}, Region: ${region}`);
-                const credentials = await this.getCredentials('aws');
-                // Create Bedrock embeddings instance
-                const bedrock_embeddings = new aws_1.BedrockEmbeddings({
-                    model: embeddingModel,
-                    region,
-                    credentials: {
-                        accessKeyId: credentials.accessKeyId,
-                        secretAccessKey: credentials.secretAccessKey,
-                        ...(credentials.sessionToken && { sessionToken: credentials.sessionToken }),
-                    },
-                });
-                // Create S3 Vectors client
-                const s3vec = new client_s3vectors_1.S3VectorsClient({
-                    region,
-                    credentials: {
-                        accessKeyId: credentials.accessKeyId,
-                        secretAccessKey: credentials.secretAccessKey,
-                        ...(credentials.sessionToken && { sessionToken: credentials.sessionToken }),
-                    },
-                });
-                switch (operation) {
-                    case 'insert': {
-                        const textField = this.getNodeParameter('textField', i);
-                        const textToProcess = items[i].json[textField];
-                        if (!textToProcess || typeof textToProcess !== 'string') {
-                            throw new n8n_workflow_1.NodeOperationError(this.getNode(), `No valid text found in field '${textField}'`, { itemIndex: i });
-                        }
-                        console.log(`[S3Vector] Processing text of length: ${textToProcess.length}`);
-                        // Generate embedding using BedrockEmbeddings
-                        const embedding = await bedrock_embeddings.embedQuery(textToProcess);
-                        console.log(`[S3Vector] Generated embedding with ${embedding.length} dimensions`);
-                        const vectorId = `vec_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-                        await s3vec.send(new client_s3vectors_1.PutVectorsCommand({
-                            indexName: indexName,
-                            vectorBucketName: bucketName,
-                            vectors: [{
-                                    key: vectorId,
-                                    data: {
-                                        float32: embedding
-                                    },
-                                    metadata: {
-                                        text: textToProcess,
-                                        ...items[i].json, // Include other metadata fields
-                                    }
-                                }]
-                        }));
-                        console.log(`[S3Vector] Inserted vector ${vectorId} into bucket ${bucketName}, index ${indexName}`);
-                        returnData.push({
-                            json: {
-                                success: true,
-                                operation: 'insert',
-                                vectorId,
-                                bucketName,
-                                indexName,
-                                textLength: textToProcess.length,
-                                embeddingDimensions: embedding.length,
-                                metadata: {
-                                    ...items[i].json,
-                                    [textField]: undefined, // Remove the original text field
-                                },
-                            },
-                        });
-                        break;
+        console.log(`[S3Vector] Starting ${operation} operation `);
+        switch (operation) {
+            case 'insert':
+                {
+                    try {
+                        return await executeS3VectorInsert(this);
                     }
-                    case 'search': {
-                        const searchQuery = this.getNodeParameter('searchQuery', i);
-                        const limit = this.getNodeParameter('limit', i);
-                        console.log(`[S3Vector] Searching for: "${searchQuery}", limit: ${limit}`);
-                        // Generate embedding for query using BedrockEmbeddings
-                        const queryEmbedding = await bedrock_embeddings.embedQuery(searchQuery);
-                        console.log(`[S3Vector] Generated query embedding with ${queryEmbedding.length} dimensions`);
-                        // Query vectors using QueryVectorsCommand
-                        // const queryData = Float32Array.from(queryEmbedding);
-                        const queryResponse = await s3vec.send(new client_s3vectors_1.QueryVectorsCommand({
-                            queryVector: {
-                                float32: queryEmbedding
-                            },
-                            topK: limit,
-                            indexName: indexName,
-                            vectorBucketName: bucketName,
-                            returnMetadata: true,
-                        }));
-                        const searchResults = queryResponse.vectors || [];
-                        console.log(`[S3Vector] Found ${searchResults.length} results`);
-                        returnData.push({
-                            json: {
-                                success: true,
-                                operation: 'search',
-                                query: searchQuery,
-                                resultsCount: searchResults.length,
-                                bucketName,
-                                indexName,
-                                results: searchResults,
-                            },
-                        });
-                        break;
+                    catch (error) {
+                        const errorMsg = error instanceof Error ? error.message : String(error);
+                        console.error(`[S3Vector] Error during insert operation: ${errorMsg}`);
                     }
-                    default:
-                        throw new n8n_workflow_1.NodeOperationError(this.getNode(), `Unknown operation: ${operation}`, { itemIndex: i });
+                    break;
                 }
-            }
-            catch (error) {
-                console.error(`[S3Vector] Error processing item ${i + 1}:`, error);
-                const errorMessage = error instanceof Error ? error.message : String(error);
-                if (this.continueOnFail()) {
-                    returnData.push({
-                        json: {
-                            success: false,
-                            error: errorMessage,
-                            operation,
-                            itemIndex: i,
-                        },
-                    });
+            case 'search':
+                {
+                    try {
+                        return await executeS3VectorSearch(this);
+                    }
+                    catch (error) {
+                        const errorMsg = error instanceof Error ? error.message : String(error);
+                        console.error(`[S3Vector] Error during search operation: ${errorMsg}`);
+                    }
+                    break;
                 }
-                else {
-                    throw new n8n_workflow_1.NodeOperationError(this.getNode(), errorMessage, { itemIndex: i });
-                }
-            }
+            default:
+                throw new n8n_workflow_1.NodeOperationError(this.getNode(), `Unknown operation: ${operation}`);
         }
-        console.log(`[S3Vector] Completed processing ${items.length} items`);
-        return [returnData];
+        throw new n8n_workflow_1.NodeOperationError(this.getNode(), `Unsupported operation: ${operation}`);
     }
 }
 exports.S3Vector = S3Vector;
+async function setup_aws(n8n_node, i = 0) {
+    // Get parameters
+    const bucketName = n8n_node.getNodeParameter('bucketName', i);
+    const indexName = n8n_node.getNodeParameter('indexName', i);
+    const region = n8n_node.getNodeParameter('region', i);
+    const embeddingModel = n8n_node.getNodeParameter('embeddingModel', i);
+    const embeddingDimensions = n8n_node.getNodeParameter('embeddingDimensions', i);
+    console.log(`[S3Vector] Config - Bucket: ${bucketName}, Index: ${indexName}, Region: ${region}`);
+    const credentials = await n8n_node.getCredentials('aws');
+    // Create Bedrock embeddings instance
+    const bedrock_embedding = new aws_1.BedrockEmbeddings({
+        model: embeddingModel,
+        region,
+        credentials: {
+            accessKeyId: credentials.accessKeyId,
+            secretAccessKey: credentials.secretAccessKey,
+            ...(credentials.sessionToken && { sessionToken: credentials.sessionToken }),
+        },
+    });
+    // Create S3 Vectors client
+    const s3_vector = new client_s3vectors_1.S3VectorsClient({
+        region,
+        credentials: {
+            accessKeyId: credentials.accessKeyId,
+            secretAccessKey: credentials.secretAccessKey,
+            ...(credentials.sessionToken && { sessionToken: credentials.sessionToken }),
+        },
+    });
+    return {
+        insert_data: async ({ key, text }, metadata) => {
+            const chunks = await generateChunks(text);
+            const embeddings = await bedrock_embedding.embedDocuments(chunks);
+            console.log(`[S3Vector] Generated ${embeddings.length} embeddings for ${chunks.length} chunks`);
+            const vectors = chunks.map((chunk, index) => ({
+                key: `${key}_chunk_${index}`,
+                data: {
+                    float32: embeddings[index],
+                },
+                metadata: {
+                    parent_key: key,
+                    text: chunk,
+                    ...metadata,
+                },
+            }));
+            console.log(`[S3Vector] Inserting ${vectors.length} vectors into S3`);
+            const resp = await s3_vector.send(new client_s3vectors_1.PutVectorsCommand({
+                indexName: indexName,
+                vectorBucketName: bucketName,
+                vectors
+            }));
+            console.log(`[S3Vector] Inserted vector ${key} into bucket ${bucketName}, index ${indexName}`);
+            return resp;
+        },
+        search_vectors: async (query, limit = 4) => {
+            console.log(`[S3Vector] Searching for: "${query}", limit: ${limit}`);
+            const queryEmbedding = await bedrock_embedding.embedQuery(query);
+            console.log(`[S3Vector] Generated query embedding with ${queryEmbedding.length} dimensions`);
+            const queryResponse = await s3_vector.send(new client_s3vectors_1.QueryVectorsCommand({
+                queryVector: {
+                    float32: queryEmbedding
+                },
+                topK: limit,
+                indexName: indexName,
+                vectorBucketName: bucketName,
+                returnMetadata: true,
+            }));
+            const searchResults = queryResponse.vectors || [];
+            console.log(`[S3Vector] Found ${searchResults.length} results`);
+            return searchResults;
+        }
+    };
+}
+async function generateChunks(text, chunkSize = 1000, chunkOverlap = 200) {
+    const textSplitter = new textsplitters_1.RecursiveCharacterTextSplitter({
+        chunkSize,
+        chunkOverlap,
+    });
+    const chunks = await textSplitter.splitText(text);
+    console.log(`[S3Vector] Generated ${chunks.length} chunks from text of length ${text.length}`);
+    return chunks;
+}
+async function executeS3VectorInsert(n8n_node) {
+    const aws = await setup_aws(n8n_node);
+    const items = n8n_node.getInputData();
+    const returnData = [];
+    for (let i = 0; i < items.length; i++) {
+        const text = n8n_node.getNodeParameter('data', i);
+        const key = n8n_node.getNodeParameter('key', i);
+        const metadata = items[i].json;
+        try {
+            const results = await aws.insert_data({ key, text }, metadata);
+            returnData.push({
+                json: {
+                    success: true,
+                    key,
+                    text,
+                    metadata,
+                    results,
+                },
+            });
+        }
+        catch (error) {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            returnData.push({
+                json: {
+                    success: false,
+                    error: errorMsg,
+                },
+            });
+            if (!n8n_node.continueOnFail()) {
+                throw new n8n_workflow_1.NodeOperationError(n8n_node.getNode(), errorMsg);
+            }
+            console.error(`[S3Vector] Error inserting data for item ${i + 1}:`, error);
+        }
+    }
+    return [returnData];
+}
+async function executeS3VectorSearch(n8n_node) {
+    const aws = await setup_aws(n8n_node);
+    const items = n8n_node.getInputData();
+    const returnData = [];
+    for (let i = 0; i < items.length; i++) {
+        const query = n8n_node.getNodeParameter('data', i);
+        const limit = n8n_node.getNodeParameter('limit', i);
+        try {
+            const results = await aws.search_vectors(query, limit);
+            returnData.push({
+                json: {
+                    success: true,
+                    query,
+                    results,
+                },
+            });
+        }
+        catch (error) {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            returnData.push({
+                json: {
+                    success: false,
+                    error: errorMsg,
+                },
+            });
+            if (!n8n_node.continueOnFail()) {
+                throw new n8n_workflow_1.NodeOperationError(n8n_node.getNode(), errorMsg);
+            }
+        }
+    }
+    return [returnData];
+}
 //# sourceMappingURL=S3Vector.node.js.map
