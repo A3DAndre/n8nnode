@@ -1,8 +1,8 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.nodeTypes = void 0;
-const VectorStoreAwsS3_node_1 = require("./src/VectorStoreAwsS3.node");
+const S3Vector_node_1 = require("./src/S3Vector.node");
 exports.nodeTypes = [
-    new VectorStoreAwsS3_node_1.VectorStoreAwsS3(),
+    new S3Vector_node_1.S3Vector(),
 ];
 //# sourceMappingURL=index.js.map

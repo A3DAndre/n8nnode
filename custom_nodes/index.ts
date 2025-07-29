@@ -1,6 +1,6 @@
 import { INodeType } from 'n8n-workflow';
-import { VectorStoreAwsS3 } from './src/VectorStoreAwsS3.node';
+import { S3Vector } from './src/S3Vector.node';
 
 export const nodeTypes: INodeType[] = [
-	new VectorStoreAwsS3(),
+	new S3Vector(),
 ];

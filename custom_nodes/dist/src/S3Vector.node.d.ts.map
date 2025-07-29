@@ -1,0 +1,1 @@
+{"version":3,"file":"S3Vector.node.d.ts","sourceRoot":"","sources":["../../src/S3Vector.node.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,iBAAiB,EAAE,kBAAkB,EAAE,SAAS,EAAE,oBAAoB,EAAsB,MAAM,cAAc,CAAC;AAW1H;;;GAGG;AACH,qBAAa,QAAS,YAAW,SAAS;IACzC,WAAW,EAAE,oBAAoB,CAwH/B;IAEI,OAAO,CAAC,IAAI,EAAE,iBAAiB,GAAG,OAAO,CAAC,kBAAkB,EAAE,EAAE,CAAC;CA+JvE"}

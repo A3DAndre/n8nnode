@@ -321,17 +321,21 @@ class VectorStoreAwsS3 {
         };
     }
     async execute() {
+        var _a, _b, _c, _d;
         const items = this.getInputData();
         const returnData = [];
         const operation = this.getNodeParameter('operation', 0);
+        console.log(`[VectorStoreAwsS3] Starting execution with operation: ${operation}, items count: ${items.length}`);
         for (let i = 0; i < items.length; i++) {
             try {
+                console.log(`[VectorStoreAwsS3] Processing item ${i + 1}/${items.length}`);
                 // Get common parameters
                 const bucketName = this.getNodeParameter('bucketName', i);
                 const indexName = this.getNodeParameter('indexName', i);
                 const region = this.getNodeParameter('region', i);
                 const embeddingModel = this.getNodeParameter('embeddingModel', i);
                 const options = this.getNodeParameter('options', i, {});
+                console.log(`[VectorStoreAwsS3] Config - Bucket: ${bucketName}, Index: ${indexName}, Region: ${region}, Model: ${embeddingModel}`);
                 const credentials = await this.getCredentials('aws');
                 // Create embeddings instance
                 const embeddings = new aws_1.BedrockEmbeddings({
@@ -354,96 +358,154 @@ class VectorStoreAwsS3 {
                         sessionToken: credentials.sessionToken,
                     },
                 };
-                if (operation === 'insert') {
-                    // Get text processing parameters
-                    const textField = this.getNodeParameter('textField', i);
-                    const chunkSize = this.getNodeParameter('chunkSize', i);
-                    const chunkOverlap = this.getNodeParameter('chunkOverlap', i);
-                    // Extract text from the specified field
-                    const textToProcess = items[i].json[textField];
-                    if (!textToProcess || typeof textToProcess !== 'string') {
-                        throw new n8n_workflow_1.NodeOperationError(this.getNode(), `No valid text found in field '${textField}'`, { itemIndex: i });
+                // Use switch statement to handle different operations
+                switch (operation) {
+                    case 'insert': {
+                        console.log(`[VectorStoreAwsS3] Starting insert operation for item ${i + 1}`);
+                        // Get text processing parameters
+                        const textField = this.getNodeParameter('textField', i);
+                        const chunkSize = this.getNodeParameter('chunkSize', i);
+                        const chunkOverlap = this.getNodeParameter('chunkOverlap', i);
+                        console.log(`[VectorStoreAwsS3] Insert params - textField: ${textField}, chunkSize: ${chunkSize}, chunkOverlap: ${chunkOverlap}`);
+                        // Extract text from the specified field
+                        const textToProcess = items[i].json[textField];
+                        console.log(`[VectorStoreAwsS3] Text to process length: ${(textToProcess === null || textToProcess === void 0 ? void 0 : textToProcess.length) || 0}`);
+                        if (!textToProcess || typeof textToProcess !== 'string') {
+                            throw new n8n_workflow_1.NodeOperationError(this.getNode(), `No valid text found in field '${textField}'`, { itemIndex: i });
+                        }
+                        // Prepare source metadata (exclude the text field)
+                        let sourceMetadata = {};
+                        if (options.includeMetadata !== false) {
+                            sourceMetadata = { ...items[i].json };
+                            delete sourceMetadata[textField]; // Remove the text field from metadata
+                        }
+                        console.log(`[VectorStoreAwsS3] Source metadata keys: ${Object.keys(sourceMetadata).join(', ')}`);
+                        // Split text into chunks using simple text splitter
+                        const textChunks = VectorStoreHelper.splitText(textToProcess, chunkSize, chunkOverlap);
+                        console.log(`[VectorStoreAwsS3] Created ${textChunks.length} text chunks`);
+                        // Create documents from chunks
+                        const documents = textChunks.map((chunk, index) => new documents_1.Document({
+                            pageContent: chunk,
+                            metadata: {
+                                ...sourceMetadata,
+                                chunkIndex: index,
+                                totalChunks: textChunks.length,
+                                originalLength: textToProcess.length,
+                                chunkSize: chunk.length,
+                                textField,
+                                ...(options.namespace && { namespace: options.namespace }),
+                            },
+                        }));
+                        console.log(`[VectorStoreAwsS3] Created ${documents.length} documents`);
+                        // Initialize vector store
+                        const vectorStore = new S3VectorStore_1.S3VectorStore(embeddings, config);
+                        await vectorStore.initialize();
+                        console.log(`[VectorStoreAwsS3] Vector store initialized`);
+                        // Insert documents in batches
+                        const batchSize = options.batchSize || 100;
+                        const insertedIds = [];
+                        console.log(`[VectorStoreAwsS3] Inserting documents in batches of ${batchSize}`);
+                        for (let j = 0; j < documents.length; j += batchSize) {
+                            const batch = documents.slice(j, j + batchSize);
+                            console.log(`[VectorStoreAwsS3] Processing batch ${Math.floor(j / batchSize) + 1}, size: ${batch.length}`);
+                            const ids = await vectorStore.addDocuments(batch);
+                            insertedIds.push(...ids);
+                        }
+                        console.log(`[VectorStoreAwsS3] Insert operation completed. Inserted ${insertedIds.length} documents`);
+                        returnData.push({
+                            json: {
+                                success: true,
+                                operation: 'insert',
+                                documentsInserted: documents.length,
+                                chunksCreated: textChunks.length,
+                                insertedIds,
+                                bucketName: config.bucketName,
+                                indexName: config.indexName,
+                                embeddingModel,
+                                textLength: textToProcess.length,
+                                chunkSize,
+                                chunkOverlap,
+                            },
+                        });
+                        break;
                     }
-                    // Prepare source metadata (exclude the text field)
-                    let sourceMetadata = {};
-                    if (options.includeMetadata !== false) {
-                        sourceMetadata = { ...items[i].json };
-                        delete sourceMetadata[textField]; // Remove the text field from metadata
-                    }
-                    // Split text into chunks using simple text splitter
-                    const textChunks = VectorStoreHelper.splitText(textToProcess, chunkSize, chunkOverlap);
-                    // Create documents from chunks
-                    const documents = textChunks.map((chunk, index) => new documents_1.Document({
-                        pageContent: chunk,
-                        metadata: {
-                            ...sourceMetadata,
-                            chunkIndex: index,
-                            totalChunks: textChunks.length,
-                            originalLength: textToProcess.length,
-                            chunkSize: chunk.length,
-                            textField,
-                            ...(options.namespace && { namespace: options.namespace }),
-                        },
-                    }));
-                    // Initialize vector store
-                    const vectorStore = new S3VectorStore_1.S3VectorStore(embeddings, config);
-                    await vectorStore.initialize();
-                    // Insert documents in batches
-                    const batchSize = options.batchSize || 100;
-                    const insertedIds = [];
-                    for (let j = 0; j < documents.length; j += batchSize) {
-                        const batch = documents.slice(j, j + batchSize);
-                        const ids = await vectorStore.addDocuments(batch);
-                        insertedIds.push(...ids);
-                    }
-                    returnData.push({
-                        json: {
-                            success: true,
-                            operation: 'insert',
-                            documentsInserted: documents.length,
-                            chunksCreated: textChunks.length,
-                            insertedIds,
-                            bucketName,
-                            indexName,
-                            embeddingModel,
-                            textLength: textToProcess.length,
-                            chunkSize,
-                            chunkOverlap,
-                        },
-                    });
-                }
-                else if (operation === 'search') {
-                    const searchQuery = this.getNodeParameter('searchQuery', i);
-                    const topK = this.getNodeParameter('topK', i);
-                    let filter;
-                    if (options.metadataFilter) {
+                    case 'search': {
+                        console.log(`[VectorStoreAwsS3] Starting search operation for item ${i + 1}`);
+                        const searchQuery = this.getNodeParameter('searchQuery', i);
+                        const topK = this.getNodeParameter('topK', i);
+                        console.log(`[VectorStoreAwsS3] Search params - query: "${searchQuery}", topK: ${topK}`);
+                        let filter;
+                        if (options.metadataFilter) {
+                            try {
+                                filter = JSON.parse(options.metadataFilter);
+                                console.log(`[VectorStoreAwsS3] Parsed metadata filter:`, filter);
+                            }
+                            catch (error) {
+                                throw new n8n_workflow_1.NodeOperationError(this.getNode(), 'Invalid JSON in metadata filter', { itemIndex: i });
+                            }
+                        }
+                        const vectorStore = new S3VectorStore_1.S3VectorStore(embeddings, { ...config, filter });
+                        await vectorStore.initialize();
+                        console.log(`[VectorStoreAwsS3] Vector store initialized for search`);
                         try {
-                            filter = JSON.parse(options.metadataFilter);
+                            console.log(`[VectorStoreAwsS3] Executing similarity search...`);
+                            const results = await vectorStore.similaritySearchWithScore(searchQuery, topK, filter);
+                            console.log(`[VectorStoreAwsS3] Search completed. Found ${(results === null || results === void 0 ? void 0 : results.length) || 0} results`);
+                            // Add additional debugging for the results structure
+                            if (results && results.length > 0) {
+                                console.log(`[VectorStoreAwsS3] First result structure:`, {
+                                    hasDocument: !!((_a = results[0]) === null || _a === void 0 ? void 0 : _a[0]),
+                                    hasScore: !!((_b = results[0]) === null || _b === void 0 ? void 0 : _b[1]),
+                                    documentType: typeof ((_c = results[0]) === null || _c === void 0 ? void 0 : _c[0]),
+                                    scoreType: typeof ((_d = results[0]) === null || _d === void 0 ? void 0 : _d[1]),
+                                });
+                            }
+                            // Safely process results with additional error checking
+                            const processedResults = (results === null || results === void 0 ? void 0 : results.map((result, index) => {
+                                console.log(`[VectorStoreAwsS3] Processing result ${index + 1}:`, {
+                                    resultType: typeof result,
+                                    isArray: Array.isArray(result),
+                                    length: Array.isArray(result) ? result.length : 'N/A',
+                                });
+                                if (!Array.isArray(result) || result.length < 2) {
+                                    console.warn(`[VectorStoreAwsS3] Invalid result structure at index ${index}:`, result);
+                                    return {
+                                        content: '',
+                                        metadata: {},
+                                        score: 0,
+                                        error: 'Invalid result structure',
+                                    };
+                                }
+                                const [doc, score] = result;
+                                return {
+                                    content: (doc === null || doc === void 0 ? void 0 : doc.pageContent) || '',
+                                    metadata: (doc === null || doc === void 0 ? void 0 : doc.metadata) || {},
+                                    score: score || 0,
+                                };
+                            })) || [];
+                            returnData.push({
+                                json: {
+                                    success: true,
+                                    operation: 'search',
+                                    query: searchQuery,
+                                    resultsCount: processedResults.length,
+                                    embeddingModel,
+                                    results: processedResults,
+                                },
+                            });
                         }
-                        catch (error) {
-                            throw new n8n_workflow_1.NodeOperationError(this.getNode(), 'Invalid JSON in metadata filter', { itemIndex: i });
+                        catch (searchError) {
+                            console.error(`[VectorStoreAwsS3] Search operation failed:`, searchError);
+                            throw new n8n_workflow_1.NodeOperationError(this.getNode(), `Failed to search vectors: ${searchError instanceof Error ? searchError.message : String(searchError)}`, { itemIndex: i });
                         }
+                        break;
                     }
-                    const vectorStore = new S3VectorStore_1.S3VectorStore(embeddings, { ...config, filter });
-                    await vectorStore.initialize();
-                    const results = await vectorStore.similaritySearchWithScore(searchQuery, topK, filter);
-                    returnData.push({
-                        json: {
-                            success: true,
-                            operation: 'search',
-                            query: searchQuery,
-                            resultsCount: results.length,
-                            embeddingModel,
-                            results: results.map(([doc, score]) => ({
-                                content: doc.pageContent,
-                                metadata: doc.metadata,
-                                score,
-                            })),
-                        },
-                    });
+                    default:
+                        throw new n8n_workflow_1.NodeOperationError(this.getNode(), `Unknown operation: ${operation}`, { itemIndex: i });
                 }
             }
             catch (error) {
+                console.error(`[VectorStoreAwsS3] Error processing item ${i + 1}:`, error);
                 const errorMessage = error instanceof Error ? error.message : String(error);
                 if (this.continueOnFail()) {
                     returnData.push({
@@ -451,6 +513,7 @@ class VectorStoreAwsS3 {
                             success: false,
                             error: errorMessage,
                             operation,
+                            itemIndex: i,
                         },
                     });
                 }
@@ -459,6 +522,7 @@ class VectorStoreAwsS3 {
                 }
             }
         }
+        console.log(`[VectorStoreAwsS3] Execution completed. Processed ${items.length} items, returned ${returnData.length} results`);
         return [returnData];
     }
 }
