@@ -11,6 +11,7 @@ import {
 	type PutVectorsCommandInput,
 	type QueryVectorsCommandInput
 } from '@aws-sdk/client-s3vectors';
+import { Bedrock } from "@langchain/community/llms/bedrock";
 
 export interface S3VectorStoreConfig {
 	bucketName: string;
@@ -67,7 +68,7 @@ export class S3VectorStore extends VectorStore {
 
 		try {
 			// Initialize vector index
-			await this.ensureIndexExists();
+			// await this.ensureIndexExists();
 			
 			this.initialized = true;
 		} catch (error) {
@@ -198,21 +199,6 @@ export class S3VectorStore extends VectorStore {
 		return results.map(([doc]) => doc);
 	}
 
-	/**
-	 * Clear the entire index
-	 */
-	async clearIndex(): Promise<void> {
-		await this.initialize();
-
-		try {
-			// Use S3 Vectors API to clear the index
-			await this.deleteIndex();
-			await this.ensureIndexExists();
-		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : String(error);
-			throw new Error(`Failed to clear S3 Vector index: ${errorMessage}`);
-		}
-	}
 
 	/**
 	 * Create S3VectorStore from documents
@@ -239,35 +225,7 @@ export class S3VectorStore extends VectorStore {
 		return instance;
 	}
 
-	/**
-	 * Private helper methods
-	 */
 
-	private async ensureIndexExists(): Promise<void> {
-		try {
-			// Try to create the index using S3 Vectors API
-			const dimensions = await this.getEmbeddingDimensions();
-			
-			const createIndexInput: CreateIndexCommandInput = {
-				indexName: this.config.indexName,
-				dataType: 'float32',
-				dimension: dimensions,
-				distanceMetric: 'cosine',
-			};
-
-			await this.s3VectorsClient.send(new CreateIndexCommand(createIndexInput));
-		} catch (error) {
-			// If index already exists, that's fine
-			if ((error as any).name === 'ResourceAlreadyExistsException' || 
-				(error as any).name === 'ConflictException' ||
-				(error as any).message?.includes('already exists')) {
-				// Index already exists, which is fine
-				return;
-			}
-			const errorMessage = error instanceof Error ? error.message : String(error);
-			throw new Error(`Failed to ensure vector index exists: ${errorMessage}`);
-		}
-	}
 
 	private async insertVectors(vectors: S3VectorDocument[]): Promise<void> {
 		try {

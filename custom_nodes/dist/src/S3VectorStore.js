@@ -34,7 +34,7 @@ class S3VectorStore extends vectorstores_1.VectorStore {
             return;
         try {
             // Initialize vector index
-            await this.ensureIndexExists();
+            // await this.ensureIndexExists();
             this.initialized = true;
         }
         catch (error) {
@@ -133,21 +133,6 @@ class S3VectorStore extends vectorstores_1.VectorStore {
         return results.map(([doc]) => doc);
     }
     /**
-     * Clear the entire index
-     */
-    async clearIndex() {
-        await this.initialize();
-        try {
-            // Use S3 Vectors API to clear the index
-            await this.deleteIndex();
-            await this.ensureIndexExists();
-        }
-        catch (error) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            throw new Error(`Failed to clear S3 Vector index: ${errorMessage}`);
-        }
-    }
-    /**
      * Create S3VectorStore from documents
      */
     static async fromDocuments(docs, embeddings, config) {
@@ -162,34 +147,6 @@ class S3VectorStore extends vectorstores_1.VectorStore {
         const instance = new S3VectorStore(embeddings, config);
         await instance.initialize();
         return instance;
-    }
-    /**
-     * Private helper methods
-     */
-    async ensureIndexExists() {
-        var _a;
-        try {
-            // Try to create the index using S3 Vectors API
-            const dimensions = await this.getEmbeddingDimensions();
-            const createIndexInput = {
-                indexName: this.config.indexName,
-                dataType: 'float32',
-                dimension: dimensions,
-                distanceMetric: 'cosine',
-            };
-            await this.s3VectorsClient.send(new client_s3vectors_1.CreateIndexCommand(createIndexInput));
-        }
-        catch (error) {
-            // If index already exists, that's fine
-            if (error.name === 'ResourceAlreadyExistsException' ||
-                error.name === 'ConflictException' ||
-                ((_a = error.message) === null || _a === void 0 ? void 0 : _a.includes('already exists'))) {
-                // Index already exists, which is fine
-                return;
-            }
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            throw new Error(`Failed to ensure vector index exists: ${errorMessage}`);
-        }
     }
     async insertVectors(vectors) {
         try {

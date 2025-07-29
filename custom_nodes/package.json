@@ -13,7 +13,10 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3vectors": "^3.848.0",
+    "@langchain/aws": "^0.1.12",
+    "@langchain/community": "^0.3.49",
     "@langchain/core": "^0.2.31",
+    "@langchain/textsplitters": "^0.1.0",
     "n8n-workflow": "^1.82.0",
     "zod": "^3.22.4"
   }

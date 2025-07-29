@@ -2,6 +2,41 @@ import { IExecuteFunctions, INodeExecutionData, INodeType, INodeTypeDescription,
 import { S3VectorStore, S3VectorStoreConfig } from './S3VectorStore';
 import { Document } from '@langchain/core/documents';
 import type { Embeddings } from '@langchain/core/embeddings';
+import { BedrockEmbeddings } from '@langchain/aws';
+class VectorStoreHelper {
+	/**
+	 * Simple text splitter implementation
+	 */
+	static splitText(text: string, chunkSize: number, chunkOverlap: number): string[] {
+		if (text.length <= chunkSize) {
+			return [text];
+		}
+
+		const chunks: string[] = [];
+		let start = 0;
+
+		while (start < text.length) {
+			let end = start + chunkSize;
+			
+			// If we're not at the end of the text, try to break at a word boundary
+			if (end < text.length) {
+				const lastSpace = text.lastIndexOf(' ', end);
+				if (lastSpace > start) {
+					end = lastSpace;
+				}
+			}
+
+			chunks.push(text.slice(start, end));
+			
+			// Move start position, accounting for overlap
+			start = end - chunkOverlap;
+			if (start <= 0) start = end;
+		}
+
+		return chunks.filter(chunk => chunk.trim().length > 0);
+	}
+}
+
 export class VectorStoreAwsS3 implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'AWS S3 Vector Store',
@@ -41,6 +76,86 @@ export class VectorStoreAwsS3 implements INodeType {
 					},
 				],
 			},
+			// Embedding Configuration
+			{
+				displayName: 'Embedding Model',
+				name: 'embeddingModel',
+				type: 'options',
+				required: true,
+				default: 'amazon.titan-embed-text-v1',
+				description: 'Bedrock embedding model to use',
+				options: [
+					{
+						name: 'Amazon Titan Text Embeddings v1',
+						value: 'amazon.titan-embed-text-v1',
+						description: 'Amazon Titan Text Embeddings v1 (1536 dimensions)',
+					},
+					{
+						name: 'Amazon Titan Text Embeddings v2',
+						value: 'amazon.titan-embed-text-v2:0',
+						description: 'Amazon Titan Text Embeddings v2 (1024 dimensions)',
+					},
+					{
+						name: 'Cohere Embed English v3',
+						value: 'cohere.embed-english-v3',
+						description: 'Cohere Embed English v3 (1024 dimensions)',
+					},
+					{
+						name: 'Cohere Embed Multilingual v3',
+						value: 'cohere.embed-multilingual-v3',
+						description: 'Cohere Embed Multilingual v3 (1024 dimensions)',
+					},
+				],
+			},
+			// Input Configuration
+			{
+				displayName: 'Text Field Name',
+				name: 'textField',
+				type: 'string',
+				required: true,
+				default: 'text',
+				description: 'Name of the field containing the text to embed',
+				placeholder: 'content, text, description, etc.',
+				displayOptions: {
+					show: {
+						operation: ['insert'],
+					},
+				},
+			},
+			// Text Splitting Configuration
+			{
+				displayName: 'Chunk Size',
+				name: 'chunkSize',
+				type: 'number',
+				default: 1000,
+				description: 'Maximum size of each text chunk in characters',
+				typeOptions: {
+					minValue: 100,
+					maxValue: 8000,
+				},
+				displayOptions: {
+					show: {
+						operation: ['insert'],
+					},
+				},
+			},
+			{
+				displayName: 'Chunk Overlap',
+				name: 'chunkOverlap',
+				type: 'number',
+				default: 200,
+				description: 'Number of characters to overlap between chunks',
+				typeOptions: {
+					minValue: 0,
+					maxValue: 1000,
+				},
+				displayOptions: {
+					show: {
+						operation: ['insert'],
+					},
+				},
+			},
+			// S3 Configuration
 			{
 				displayName: 'Bucket Name',
 				name: 'bucketName',
@@ -109,6 +224,7 @@ export class VectorStoreAwsS3 implements INodeType {
 					},
 				],
 			},
+			// Search Configuration
 			{
 				displayName: 'Search Query',
 				name: 'searchQuery',
@@ -134,6 +250,7 @@ export class VectorStoreAwsS3 implements INodeType {
 					},
 				},
 			},
+			// Advanced Options
 			{
 				displayName: 'Options',
 				name: 'options',
@@ -189,6 +306,18 @@ export class VectorStoreAwsS3 implements INodeType {
 							},
 						},
 					},
+					{
+						displayName: 'Include Source Metadata',
+						name: 'includeMetadata',
+						type: 'boolean',
+						default: true,
+						description: 'Whether to include original input data as metadata',
+						displayOptions: {
+							show: {
+								'/operation': ['insert'],
+							},
+						},
+					},
 				],
 			},
 		],
@@ -201,17 +330,31 @@ export class VectorStoreAwsS3 implements INodeType {
 
 		for (let i = 0; i < items.length; i++) {
 			try {
+				// Get common parameters
 				const bucketName = this.getNodeParameter('bucketName', i) as string;
 				const indexName = this.getNodeParameter('indexName', i) as string;
 				const region = this.getNodeParameter('region', i) as string;
+				const embeddingModel = this.getNodeParameter('embeddingModel', i) as string;
 				const options = this.getNodeParameter('options', i, {}) as {
 					namespace?: string;
 					batchSize?: number;
 					clearIndex?: boolean;
 					metadataFilter?: string;
+					includeMetadata?: boolean;
 				};
 
 				const credentials = await this.getCredentials('aws');
+
+				// Create embeddings instance
+				const embeddings = new BedrockEmbeddings({
+					model: embeddingModel,
+					region,
+					credentials: {
+						accessKeyId: credentials.accessKeyId as string,
+						secretAccessKey: credentials.secretAccessKey as string,
+						...(credentials.sessionToken && { sessionToken: credentials.sessionToken as string }),
+					},
+				});
 
 				const config: S3VectorStoreConfig = {
 					bucketName,
@@ -226,25 +369,46 @@ export class VectorStoreAwsS3 implements INodeType {
 				};
 
 				if (operation === 'insert') {
-					// For insert operation, expect documents in the input data
-					const documents = items[i].json.documents as Document[] || [];
-					const embeddings = items[i].json.embeddings as Embeddings;
+					// Get text processing parameters
+					const textField = this.getNodeParameter('textField', i) as string;
+					const chunkSize = this.getNodeParameter('chunkSize', i) as number;
+					const chunkOverlap = this.getNodeParameter('chunkOverlap', i) as number;
 
-					if (!documents.length) {
-						throw new NodeOperationError(this.getNode(), 'No documents provided for insertion', { itemIndex: i });
+					// Extract text from the specified field
+					// const textToProcess = items[i].json[textField] as string;
+					const textToProcess = textField.trim()
+					if (!textToProcess || typeof textToProcess !== 'string') {
+						throw new NodeOperationError(this.getNode(), `No valid text found in field '${textField}'`, { itemIndex: i });
 					}
 
-					if (!embeddings) {
-						throw new NodeOperationError(this.getNode(), 'No embeddings model provided', { itemIndex: i });
+					// Prepare source metadata (exclude the text field)
+					let sourceMetadata: Record<string, any> = {};
+					if (options.includeMetadata !== false) {
+						sourceMetadata = { ...items[i].json };
+						delete sourceMetadata[textField]; // Remove the text field from metadata
 					}
 
+					// Split text into chunks using simple text splitter
+					const textChunks = VectorStoreHelper.splitText(textToProcess, chunkSize, chunkOverlap);
+
+					// Create documents from chunks
+					const documents: Document[] = textChunks.map((chunk, index) => new Document({
+						pageContent: chunk,
+						metadata: {
+							...sourceMetadata,
+							chunkIndex: index,
+							totalChunks: textChunks.length,
+							originalLength: textToProcess.length,
+							chunkSize: chunk.length,
+							textField,
+							...(options.namespace && { namespace: options.namespace }),
+						},
+					}));
+
+					// Initialize vector store
 					const vectorStore = new S3VectorStore(embeddings, config);
 					await vectorStore.initialize();
 
-					// Clear index if requested
-					if (options.clearIndex) {
-						await vectorStore.clearIndex();
-					}
 
 					// Insert documents in batches
 					const batchSize = options.batchSize || 100;
@@ -261,20 +425,20 @@ export class VectorStoreAwsS3 implements INodeType {
 							success: true,
 							operation: 'insert',
 							documentsInserted: documents.length,
+							chunksCreated: textChunks.length,
 							insertedIds,
 							bucketName,
 							indexName,
+							embeddingModel,
+							textLength: textToProcess.length,
+							chunkSize,
+							chunkOverlap,
 						},
 					});
 
 				} else if (operation === 'search') {
 					const searchQuery = this.getNodeParameter('searchQuery', i) as string;
 					const topK = this.getNodeParameter('topK', i) as number;
-					const embeddings = items[i].json.embeddings as Embeddings;
-
-					if (!embeddings) {
-						throw new NodeOperationError(this.getNode(), 'No embeddings model provided', { itemIndex: i });
-					}
 
 					let filter: Record<string, any> | undefined;
 					if (options.metadataFilter) {
@@ -296,6 +460,7 @@ export class VectorStoreAwsS3 implements INodeType {
 							operation: 'search',
 							query: searchQuery,
 							resultsCount: results.length,
+							embeddingModel,
 							results: results.map(([doc, score]) => ({
 								content: doc.pageContent,
 								metadata: doc.metadata,
@@ -303,7 +468,6 @@ export class VectorStoreAwsS3 implements INodeType {
 							})),
 						},
 					});
-
 				}
 
 			} catch (error) {
@@ -324,4 +488,5 @@ export class VectorStoreAwsS3 implements INodeType {
 
 		return [returnData];
 	}
+
 }

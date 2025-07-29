@@ -3,6 +3,36 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.VectorStoreAwsS3 = void 0;
 const n8n_workflow_1 = require("n8n-workflow");
 const S3VectorStore_1 = require("./S3VectorStore");
+const documents_1 = require("@langchain/core/documents");
+const aws_1 = require("@langchain/aws");
+class VectorStoreHelper {
+    /**
+     * Simple text splitter implementation
+     */
+    static splitText(text, chunkSize, chunkOverlap) {
+        if (text.length <= chunkSize) {
+            return [text];
+        }
+        const chunks = [];
+        let start = 0;
+        while (start < text.length) {
+            let end = start + chunkSize;
+            // If we're not at the end of the text, try to break at a word boundary
+            if (end < text.length) {
+                const lastSpace = text.lastIndexOf(' ', end);
+                if (lastSpace > start) {
+                    end = lastSpace;
+                }
+            }
+            chunks.push(text.slice(start, end));
+            // Move start position, accounting for overlap
+            start = end - chunkOverlap;
+            if (start <= 0)
+                start = end;
+        }
+        return chunks.filter(chunk => chunk.trim().length > 0);
+    }
+}
 class VectorStoreAwsS3 {
     constructor() {
         this.description = {
@@ -43,6 +73,86 @@ class VectorStoreAwsS3 {
                         },
                     ],
                 },
+                // Embedding Configuration
+                {
+                    displayName: 'Embedding Model',
+                    name: 'embeddingModel',
+                    type: 'options',
+                    required: true,
+                    default: 'amazon.titan-embed-text-v1',
+                    description: 'Bedrock embedding model to use',
+                    options: [
+                        {
+                            name: 'Amazon Titan Text Embeddings v1',
+                            value: 'amazon.titan-embed-text-v1',
+                            description: 'Amazon Titan Text Embeddings v1 (1536 dimensions)',
+                        },
+                        {
+                            name: 'Amazon Titan Text Embeddings v2',
+                            value: 'amazon.titan-embed-text-v2:0',
+                            description: 'Amazon Titan Text Embeddings v2 (1024 dimensions)',
+                        },
+                        {
+                            name: 'Cohere Embed English v3',
+                            value: 'cohere.embed-english-v3',
+                            description: 'Cohere Embed English v3 (1024 dimensions)',
+                        },
+                        {
+                            name: 'Cohere Embed Multilingual v3',
+                            value: 'cohere.embed-multilingual-v3',
+                            description: 'Cohere Embed Multilingual v3 (1024 dimensions)',
+                        },
+                    ],
+                },
+                // Input Configuration
+                {
+                    displayName: 'Text Field Name',
+                    name: 'textField',
+                    type: 'string',
+                    required: true,
+                    default: 'text',
+                    description: 'Name of the field containing the text to embed',
+                    placeholder: 'content, text, description, etc.',
+                    displayOptions: {
+                        show: {
+                            operation: ['insert'],
+                        },
+                    },
+                },
+                // Text Splitting Configuration
+                {
+                    displayName: 'Chunk Size',
+                    name: 'chunkSize',
+                    type: 'number',
+                    default: 1000,
+                    description: 'Maximum size of each text chunk in characters',
+                    typeOptions: {
+                        minValue: 100,
+                        maxValue: 8000,
+                    },
+                    displayOptions: {
+                        show: {
+                            operation: ['insert'],
+                        },
+                    },
+                },
+                {
+                    displayName: 'Chunk Overlap',
+                    name: 'chunkOverlap',
+                    type: 'number',
+                    default: 200,
+                    description: 'Number of characters to overlap between chunks',
+                    typeOptions: {
+                        minValue: 0,
+                        maxValue: 1000,
+                    },
+                    displayOptions: {
+                        show: {
+                            operation: ['insert'],
+                        },
+                    },
+                },
+                // S3 Configuration
                 {
                     displayName: 'Bucket Name',
                     name: 'bucketName',
@@ -111,6 +221,7 @@ class VectorStoreAwsS3 {
                         },
                     ],
                 },
+                // Search Configuration
                 {
                     displayName: 'Search Query',
                     name: 'searchQuery',
@@ -136,6 +247,7 @@ class VectorStoreAwsS3 {
                         },
                     },
                 },
+                // Advanced Options
                 {
                     displayName: 'Options',
                     name: 'options',
@@ -191,6 +303,18 @@ class VectorStoreAwsS3 {
                                 },
                             },
                         },
+                        {
+                            displayName: 'Include Source Metadata',
+                            name: 'includeMetadata',
+                            type: 'boolean',
+                            default: true,
+                            description: 'Whether to include original input data as metadata',
+                            displayOptions: {
+                                show: {
+                                    '/operation': ['insert'],
+                                },
+                            },
+                        },
                     ],
                 },
             ],
@@ -202,11 +326,23 @@ class VectorStoreAwsS3 {
         const operation = this.getNodeParameter('operation', 0);
         for (let i = 0; i < items.length; i++) {
             try {
+                // Get common parameters
                 const bucketName = this.getNodeParameter('bucketName', i);
                 const indexName = this.getNodeParameter('indexName', i);
                 const region = this.getNodeParameter('region', i);
+                const embeddingModel = this.getNodeParameter('embeddingModel', i);
                 const options = this.getNodeParameter('options', i, {});
                 const credentials = await this.getCredentials('aws');
+                // Create embeddings instance
+                const embeddings = new aws_1.BedrockEmbeddings({
+                    model: embeddingModel,
+                    region,
+                    credentials: {
+                        accessKeyId: credentials.accessKeyId,
+                        secretAccessKey: credentials.secretAccessKey,
+                        ...(credentials.sessionToken && { sessionToken: credentials.sessionToken }),
+                    },
+                });
                 const config = {
                     bucketName,
                     indexName,
@@ -219,21 +355,39 @@ class VectorStoreAwsS3 {
                     },
                 };
                 if (operation === 'insert') {
-                    // For insert operation, expect documents in the input data
-                    const documents = items[i].json.documents || [];
-                    const embeddings = items[i].json.embeddings;
-                    if (!documents.length) {
-                        throw new n8n_workflow_1.NodeOperationError(this.getNode(), 'No documents provided for insertion', { itemIndex: i });
+                    // Get text processing parameters
+                    const textField = this.getNodeParameter('textField', i);
+                    const chunkSize = this.getNodeParameter('chunkSize', i);
+                    const chunkOverlap = this.getNodeParameter('chunkOverlap', i);
+                    // Extract text from the specified field
+                    const textToProcess = items[i].json[textField];
+                    if (!textToProcess || typeof textToProcess !== 'string') {
+                        throw new n8n_workflow_1.NodeOperationError(this.getNode(), `No valid text found in field '${textField}'`, { itemIndex: i });
                     }
-                    if (!embeddings) {
-                        throw new n8n_workflow_1.NodeOperationError(this.getNode(), 'No embeddings model provided', { itemIndex: i });
+                    // Prepare source metadata (exclude the text field)
+                    let sourceMetadata = {};
+                    if (options.includeMetadata !== false) {
+                        sourceMetadata = { ...items[i].json };
+                        delete sourceMetadata[textField]; // Remove the text field from metadata
                     }
+                    // Split text into chunks using simple text splitter
+                    const textChunks = VectorStoreHelper.splitText(textToProcess, chunkSize, chunkOverlap);
+                    // Create documents from chunks
+                    const documents = textChunks.map((chunk, index) => new documents_1.Document({
+                        pageContent: chunk,
+                        metadata: {
+                            ...sourceMetadata,
+                            chunkIndex: index,
+                            totalChunks: textChunks.length,
+                            originalLength: textToProcess.length,
+                            chunkSize: chunk.length,
+                            textField,
+                            ...(options.namespace && { namespace: options.namespace }),
+                        },
+                    }));
+                    // Initialize vector store
                     const vectorStore = new S3VectorStore_1.S3VectorStore(embeddings, config);
                     await vectorStore.initialize();
-                    // Clear index if requested
-                    if (options.clearIndex) {
-                        await vectorStore.clearIndex();
-                    }
                     // Insert documents in batches
                     const batchSize = options.batchSize || 100;
                     const insertedIds = [];
@@ -247,19 +401,20 @@ class VectorStoreAwsS3 {
                             success: true,
                             operation: 'insert',
                             documentsInserted: documents.length,
+                            chunksCreated: textChunks.length,
                             insertedIds,
                             bucketName,
                             indexName,
+                            embeddingModel,
+                            textLength: textToProcess.length,
+                            chunkSize,
+                            chunkOverlap,
                         },
                     });
                 }
                 else if (operation === 'search') {
                     const searchQuery = this.getNodeParameter('searchQuery', i);
                     const topK = this.getNodeParameter('topK', i);
-                    const embeddings = items[i].json.embeddings;
-                    if (!embeddings) {
-                        throw new n8n_workflow_1.NodeOperationError(this.getNode(), 'No embeddings model provided', { itemIndex: i });
-                    }
                     let filter;
                     if (options.metadataFilter) {
                         try {
@@ -278,6 +433,7 @@ class VectorStoreAwsS3 {
                             operation: 'search',
                             query: searchQuery,
                             resultsCount: results.length,
+                            embeddingModel,
                             results: results.map(([doc, score]) => ({
                                 content: doc.pageContent,
                                 metadata: doc.metadata,

@@ -55,10 +55,6 @@ export declare class S3VectorStore extends VectorStore {
      */
     similaritySearch(query: string, k?: number, filter?: Record<string, any>): Promise<Document[]>;
     /**
-     * Clear the entire index
-     */
-    clearIndex(): Promise<void>;
-    /**
      * Create S3VectorStore from documents
      */
     static fromDocuments(docs: Document[], embeddings: Embeddings, config: S3VectorStoreConfig): Promise<S3VectorStore>;
@@ -66,10 +62,6 @@ export declare class S3VectorStore extends VectorStore {
      * Create S3VectorStore from existing index
      */
     static fromExistingIndex(embeddings: Embeddings, config: S3VectorStoreConfig): Promise<S3VectorStore>;
-    /**
-     * Private helper methods
-     */
-    private ensureIndexExists;
     private insertVectors;
     private searchVectors;
     private deleteIndex;
